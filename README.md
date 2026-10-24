@@ -1,14 +1,14 @@
 # rev-hardware-client.mjs
 
-A Node.js command line tool that updates REV Driver Hubs, Control Hubs, and Expansion Hubs.
+This repo houses `rev-hardware-client.mjs`, a Node.js command line tool that updates REV Driver Hubs, Control Hubs, and Expansion Hubs.
 It runs the same OS and firmware update steps as REV Hardware Client, but is designed to
-work on macOS without requiring Windows.
+work on macOS. No Windows or virtualization layers.
 
 ## Why this tool exists
 
-The Rev Hardware Client only works on Windows, despite the fact that it was built on a cross-platform application framework and uses cross-platform binaries and cross-platform protocols.
+The Rev Hardware Client only works on Windows. That's despite the fact that it is built on Electron, a widely used application framework notable for its cross-platform application support. ¯\_(ツ)_/¯
 
-This project extracts the important bits of the REV Hardware Client for FTC-relevant functionality and reimplements them in a cross-platform manner, specifically for macOS and Linux users.
+This project extracts the important bits of FTC-specific functionality from the REV Hardware Client and reimplements them in to be generic and cross-platform, specifically for macOS and Linux users.
 
 Note: This tool does not support all the features of the full REV Hardware Client. See the [Not supported](#not-supported) section below for details. It might be possible to extract those features as well, but no effort has been made to do so here.
 
@@ -90,4 +90,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Disclaimer
 
-This tool is provided as-is, without any warranty. Use it at your own risk. It worked during development, but your mileage may vary.
+This tool is provided as-is, without any warranty. Use it at your own risk. It worked during development and uses battle-tested tools (adb, nodejs), standard protocols (HTTP), and interacts with the same interfaces the official client does. But, it's still a third-party tool writing updates to proprietary hardware. We've run it and we're still here. But, we're weird people who don't fret about breaking things. You do you.
