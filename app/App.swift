@@ -496,40 +496,48 @@ extension View {
 // theme
 
 enum Theme {
-    static let bg = Color(white: 0.055)
-    static let sidebar = Color(white: 0.075)
-    static let panelTop = Color(white: 0.125)
-    static let panelBottom = Color(white: 0.095)
-    static let raised = Color(white: 0.16)
+    static let bg = Color(white: 0.06)
+    static let sidebar = Color(white: 0.08)
+    static let panel = Color(white: 0.11)
+    static let raised = Color(white: 0.15)
+    static let control = Color(white: 0.17)
     static let accent = Color(red: 0.25, green: 0.55, blue: 1.0)
 
-    static func stroke(_ hc: Bool) -> Color { .white.opacity(hc ? 0.4 : 0.08) }
+    static func stroke(_ hc: Bool) -> Color { .white.opacity(hc ? 0.4 : 0.07) }
     static func dim(_ hc: Bool) -> Color { .white.opacity(hc ? 0.9 : 0.55) }
 }
 
-// raised surface with top highlight
+// 1px top edge highlight
+struct TopEdge: View {
+    var radius: CGFloat
+    var opacity: Double = 0.07
+    var body: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .stroke(.white.opacity(opacity), lineWidth: 1)
+            .mask(VStack(spacing: 0) { Rectangle().frame(height: 1.5); Spacer(minLength: 0) })
+            .allowsHitTesting(false)
+    }
+}
+
+// flat raised surface
 struct Tactile: ViewModifier {
-    var radius: CGFloat = 16
+    var radius: CGFloat = 14
     var hc: Bool
     func body(content: Content) -> some View {
         content
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(LinearGradient(colors: [Theme.panelTop, Theme.panelBottom], startPoint: .top, endPoint: .bottom))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        hc ? AnyShapeStyle(Theme.stroke(true))
-                           : AnyShapeStyle(LinearGradient(colors: [.white.opacity(0.14), .white.opacity(0.03)], startPoint: .top, endPoint: .bottom)),
-                        lineWidth: hc ? 1.5 : 1)
-            )
-            .shadow(color: .black.opacity(0.55), radius: 14, y: 8)
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Theme.panel))
+            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(Theme.stroke(hc), lineWidth: hc ? 1.5 : 1))
+            .overlay(TopEdge(radius: radius))
+            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
     }
 }
 
 extension View {
-    func tactile(_ hc: Bool, radius: CGFloat = 16) -> some View { modifier(Tactile(radius: radius, hc: hc)) }
+    @ViewBuilder func noFocusRing() -> some View {
+        if #available(macOS 14.0, *) { focusEffectDisabled() } else { self }
+    }
+    func tactile(_ hc: Bool, radius: CGFloat = 14) -> some View { modifier(Tactile(radius: radius, hc: hc)) }
 }
 
 struct PillStyle: ButtonStyle {
@@ -540,17 +548,15 @@ struct PillStyle: ButtonStyle {
     func makeBody(configuration c: Configuration) -> some View {
         c.label
             .font(.system(size: 13, weight: .semibold))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .foregroundStyle(primary ? Color.black : Color.white)
-            .background(
-                Capsule().fill(primary
-                    ? AnyShapeStyle(LinearGradient(colors: [.white, Color(white: 0.84)], startPoint: .top, endPoint: .bottom))
-                    : AnyShapeStyle(LinearGradient(colors: [Color(white: 0.2), Color(white: 0.14)], startPoint: .top, endPoint: .bottom)))
-            )
-            .overlay(Capsule().strokeBorder(.white.opacity(primary ? 0 : 0.12)))
-            .shadow(color: .black.opacity(0.5), radius: c.isPressed ? 1 : 4, y: c.isPressed ? 0 : 2)
-            .scaleEffect(c.isPressed && !reduceMotion ? 0.97 : 1)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .foregroundStyle(primary ? Color.black : Color.white.opacity(0.92))
+            .background(Capsule().fill(primary
+                ? Color(white: c.isPressed ? 0.82 : 0.94)
+                : Color(white: c.isPressed ? 0.14 : 0.18)))
+            .overlay(Capsule().strokeBorder(.white.opacity(primary ? 0 : 0.08)))
+            .shadow(color: .black.opacity(0.3), radius: c.isPressed ? 0 : 2, y: c.isPressed ? 0 : 1)
+            .scaleEffect(c.isPressed && !reduceMotion ? 0.98 : 1)
             .opacity(enabled ? 1 : 0.4)
             .contentShape(Capsule())
     }
@@ -561,10 +567,10 @@ struct Keycap: View {
     var body: some View {
         Text(text)
             .font(.system(size: 10, weight: .medium, design: .rounded))
-            .foregroundStyle(.white.opacity(0.6))
+            .foregroundStyle(.white.opacity(0.5))
             .padding(.horizontal, 5).padding(.vertical, 2)
-            .background(RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.12)))
-            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.white.opacity(0.12)))
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.white.opacity(0.08)))
             .accessibilityHidden(true)
     }
 }
@@ -577,10 +583,9 @@ struct Chip: View {
             Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
             Text(text).font(.system(size: 11, weight: .medium))
         }
-        .foregroundStyle(.white.opacity(0.7))
+        .foregroundStyle(.white.opacity(0.65))
         .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(Capsule().fill(Color(white: 0.13)))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.1)))
+        .background(Capsule().fill(Color.white.opacity(0.06)))
     }
 }
 
@@ -590,18 +595,12 @@ struct IconTile: View {
     var tint: Color = .white
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: size * 0.42, weight: .semibold))
+            .font(.system(size: size * 0.4, weight: .medium))
             .foregroundStyle(tint)
             .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(white: 0.22), Color(white: 0.12)], startPoint: .top, endPoint: .bottom))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [.white.opacity(0.2), .white.opacity(0.04)], startPoint: .top, endPoint: .bottom))
-            )
-            .shadow(color: .black.opacity(0.6), radius: 6, y: 3)
+            .background(RoundedRectangle(cornerRadius: size * 0.26, style: .continuous).fill(Theme.control))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.26, style: .continuous).strokeBorder(.white.opacity(0.06)))
+            .overlay(TopEdge(radius: size * 0.26, opacity: 0.1))
             .accessibilityHidden(true)
     }
 }
@@ -693,6 +692,10 @@ struct ContentView: View {
     // sidebar
 
     var sidebar: some View {
+        sidebarBody.noFocusRing()
+    }
+
+    var sidebarBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Logo(size: 30)
