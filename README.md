@@ -44,6 +44,7 @@ FTDI D2XX, or `dfu-util-static.exe`.
 ```
 ./rev-hardware-client.mjs list
 # prints each device ID and type, for example "R3CN9026H8P    driver-hub"
+# add --json to list, discover-hubs, or wifi for machine-readable output
 
 ./rev-hardware-client.mjs update driver-hub-os
 # dry run, prints the version and file, and does not contact the hub
@@ -59,12 +60,29 @@ FTDI D2XX, or `dfu-util-static.exe`.
 
 ./rev-hardware-client.mjs update hub-firmware --serial "(embedded)" --yes
 ./rev-hardware-client.mjs update hub-firmware --serial <expansion-hub-serial> --yes
+
+./rev-hardware-client.mjs wifi
+# checks whether this Mac is on a Robot Controller network, pings 192.168.43.1,
+# and checks the RC web server on port 8080
 ```
 
 If more than one device is attached, pass `--adb-id <id>` to any command. Get the ID
 from `list`.
 
 The tool caches verified downloads in `~/.rhc-mac-tool/downloads/`.
+
+## Mac app
+
+`app/` is a simple MacOS-only SwiftUI app.
+
+```
+./app/build.sh
+open "app/build/REV Hub Updater.app"
+```
+Has same functionality as just using this service with the commands
+
+macOS hides the Wi‑Fi network name unless an app has location access. The CLI can't
+show it; the app asks for permission the first time you click **Show network name**.
 
 ## Not supported
 

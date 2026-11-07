@@ -35,9 +35,18 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  rmSync,
+  realpathSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const MAIN_JSON_URL =
   'https://www.revrobotics.com/content/sw/rev-hw-client/main.json';
@@ -118,10 +127,25 @@ async function findFreePortPair() {
   die('Could not find a free local port pair for adb forward');
 }
 
+const forwarded = [];
+
+// drop our forwards on exit
+process.on('exit', () => {
+  for (const { adbId, port } of forwarded) {
+    try {
+      execFileSync('adb', ['-s', adbId, 'forward', '--remove', `tcp:${port}`], {
+        stdio: 'ignore',
+      });
+    } catch {}
+  }
+});
+
 async function forwardPorts(adbId) {
   const port = await findFreePortPair();
   adb(['forward', `tcp:${port}`, 'tcp:8080'], { adbId });
+  forwarded.push({ adbId, port });
   adb(['forward', `tcp:${port + 1}`, 'tcp:8081'], { adbId });
+  forwarded.push({ adbId, port: port + 1 });
   log(`Forwarded 127.0.0.1:${port} -> device:8080 (and ${port + 1} -> 8081)`);
   return port;
 }
@@ -168,14 +192,17 @@ async function downloadAndVerify(softwareInfo) {
   const res = await fetch(softwareInfo.url);
   if (!res.ok) die(`Download failed: ${res.status} ${res.statusText}`);
   const buffer = Buffer.from(await res.arrayBuffer());
-  writeFileSync(filePath, buffer);
+  const partPath = `${filePath}.part`;
+  writeFileSync(partPath, buffer);
 
-  const actualSha256 = sha256Of(filePath);
+  const actualSha256 = sha256Of(partPath);
   if (actualSha256 !== softwareInfo.sha256.toLowerCase()) {
+    rmSync(partPath, { force: true });
     die(
       `Checksum mismatch for ${filePath}\n  expected: ${softwareInfo.sha256}\n  actual:   ${actualSha256}`,
     );
   }
+  renameSync(partPath, filePath);
   log(`Downloaded and verified: ${filePath}`);
   return filePath;
 }
@@ -243,9 +270,13 @@ async function getHubJson(port, hubPath, timeoutMs = 6000) {
   }
 }
 
-async function cmdList() {
+async function cmdList({ json }) {
   checkAdbAvailable();
   const ids = listAdbDevices();
+  if (json) {
+    log(JSON.stringify(ids.map((id) => ({ id, type: identifyDevice(id) }))));
+    return;
+  }
   if (ids.length === 0) {
     log('No ADB devices found. Plug in a Driver Hub or Control Hub over USB.');
     return;
@@ -256,7 +287,7 @@ async function cmdList() {
   }
 }
 
-async function cmdDiscoverHubs({ adbId }) {
+async function cmdDiscoverHubs({ adbId, json }) {
   checkAdbAvailable();
   const id = adbId ?? requireSingleDevice();
   const type = identifyDevice(id);
@@ -271,12 +302,104 @@ async function cmdDiscoverHubs({ adbId }) {
     die(
       "Could not reach the Control Hub's local API (is the Robot Controller app running?)",
     );
+  const list = modules.modules ?? [];
+  if (json) {
+    log(JSON.stringify(list));
+    return;
+  }
   log('Hubs available for firmware update:');
-  for (const m of modules.modules) {
+  for (const m of list) {
     log(
       `  serial=${m.serialNumber}\tmoduleAddress=${m.moduleAddress}\tfirmware=${m.formattedFirmwareVersionString}`,
     );
   }
+}
+
+const RC_IP = '192.168.43.1';
+
+function sh(cmd, args) {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (e) {
+    return e.stdout || '';
+  }
+}
+
+function wifiInterface() {
+  const out = sh('networksetup', ['-listallhardwareports']);
+  const m = out.match(/Hardware Port: Wi-Fi\nDevice: (\S+)/);
+  return m ? m[1] : 'en0';
+}
+
+function pingHost(host) {
+  const out = sh('ping', ['-c', '3', '-t', '4', '-q', host]);
+  const loss = out.match(/([\d.]+)% packet loss/);
+  const rtt = out.match(/= [\d.]+\/([\d.]+)\//);
+  return {
+    host,
+    reachable: !!rtt,
+    lossPercent: loss ? Number(loss[1]) : 100,
+    avgMs: rtt ? Number(rtt[1]) : null,
+  };
+}
+
+async function webServerUp(host) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    await fetch(`http://${host}:8080/`, { signal: controller.signal });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getWifiInfo() {
+  const iface = wifiInterface();
+  const summary = sh('ipconfig', ['getsummary', iface]);
+  const ssidMatch = summary.match(/^\s*SSID : (.+)$/m);
+  const ssid =
+    ssidMatch && ssidMatch[1] !== '<redacted>' ? ssidMatch[1].trim() : null;
+  const ip = sh('ipconfig', ['getifaddr', iface]).trim() || null;
+  const routerMatch = summary.match(/^\s*Router : (\S+)$/m);
+  const gateway = routerMatch ? routerMatch[1] : null;
+  const ping = pingHost(RC_IP);
+  const web = ping.reachable ? await webServerUp(RC_IP) : false;
+  return {
+    interface: iface,
+    connected: !!ip,
+    ssid,
+    ssidHidden: !!ssidMatch && !ssid,
+    ip,
+    gateway,
+    // rc hotspots hand out 192.168.43.x
+    onRcNetwork: gateway === RC_IP || (ip ?? '').startsWith('192.168.43.'),
+    rcAddress: RC_IP,
+    ping,
+    webServer: web,
+  };
+}
+
+async function cmdWifi({ json }) {
+  const w = await getWifiInfo();
+  if (json) {
+    log(JSON.stringify(w));
+    return;
+  }
+  log(`Interface:   ${w.interface}`);
+  log(`Connected:   ${w.connected ? 'yes' : 'no'}`);
+  log(
+    `Network:     ${w.ssid ?? (w.ssidHidden ? '(hidden by macOS, needs location permission)' : 'unknown')}`,
+  );
+  log(`IP address:  ${w.ip ?? '-'}`);
+  log(`Gateway:     ${w.gateway ?? '-'}`);
+  log(`RC network:  ${w.onRcNetwork ? 'yes' : 'no'}`);
+  log(
+    `Ping ${w.rcAddress}: ${w.ping.reachable ? `${w.ping.avgMs} ms, ${w.ping.lossPercent}% loss` : 'no reply'}`,
+  );
+  log(`RC web server: ${w.webServer ? 'up' : 'not reachable'}`);
 }
 
 function requireSingleDevice() {
@@ -397,9 +520,13 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--yes') flags.yes = true;
-    else if (arg === '--adb-id') flags.adbId = argv[++i];
-    else if (arg === '--serial') flags.serial = argv[++i];
-    else positional.push(arg);
+    else if (arg === '--json') flags.json = true;
+    else if (arg === '--adb-id' || arg === '--serial') {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--'))
+        die(`${arg} needs a value`);
+      flags[arg === '--adb-id' ? 'adbId' : 'serial'] = value;
+    } else positional.push(arg);
   }
   return { positional, flags };
 }
@@ -410,7 +537,9 @@ async function main() {
 
   switch (command) {
     case 'list':
-      return cmdList();
+      return cmdList(flags);
+    case 'wifi':
+      return cmdWifi(flags);
     case 'discover-hubs':
       return cmdDiscoverHubs(flags);
     case 'update':
@@ -420,14 +549,26 @@ async function main() {
     default:
       log(
         'Usage:\n' +
-          '  rev-hardware-client.mjs list\n' +
-          '  rev-hardware-client.mjs discover-hubs [--adb-id <id>]\n' +
+          '  rev-hardware-client.mjs list [--json]\n' +
+          '  rev-hardware-client.mjs discover-hubs [--adb-id <id>] [--json]\n' +
+          '  rev-hardware-client.mjs wifi [--json]\n' +
           '  rev-hardware-client.mjs update driver-hub-os|control-hub-os|hub-firmware [--adb-id <id>] [--serial <serial>] [--yes]\n',
       );
       process.exit(command ? 1 : 0);
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// works with spaces and symlinks in the path
+const isMain = (() => {
+  try {
+    return (
+      import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+    );
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) {
   main().catch((e) => die(e.stack || e.message));
 }
