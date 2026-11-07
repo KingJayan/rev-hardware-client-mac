@@ -41,6 +41,11 @@ enum Target: String, CaseIterable, Identifiable {
     case driverOS = "driver-hub-os"
     case controlOS = "control-hub-os"
     case firmware = "hub-firmware"
+    case rcApp = "robot-controller-app"
+    case dsApp = "driver-station-app"
+    case sparkMax = "spark-max-firmware"
+    case sparkFlex = "spark-flex-firmware"
+    case servoHub = "servo-hub-firmware"
     var id: String { rawValue }
 
     var title: String {
@@ -48,24 +53,98 @@ enum Target: String, CaseIterable, Identifiable {
         case .driverOS: return "Driver Hub OS"
         case .controlOS: return "Control Hub OS"
         case .firmware: return "Hub Firmware"
+        case .rcApp: return "Robot Controller App"
+        case .dsApp: return "Driver Station App"
+        case .sparkMax: return "SPARK MAX"
+        case .sparkFlex: return "SPARK Flex"
+        case .servoHub: return "Servo Hub"
         }
     }
 
     var detail: String {
         switch self {
-        case .driverOS: return "Installs the latest operating system. The hub reboots when done."
-        case .controlOS: return "Installs the latest operating system. The hub reboots when done."
+        case .driverOS, .controlOS: return "Installs the latest operating system. The hub reboots when done."
         case .firmware: return "Updates the firmware of this hub or a connected Expansion Hub."
+        case .rcApp: return "Installs the latest FTC Robot Controller app and opens it."
+        case .dsApp: return "Installs the latest FTC Driver Station app and opens it."
+        case .sparkMax, .sparkFlex, .servoHub: return "Flashes the latest firmware over USB recovery (DFU) mode."
         }
     }
 
+    var symbol: String {
+        switch self {
+        case .driverOS, .controlOS: return "shippingbox"
+        case .firmware: return "memorychip"
+        case .rcApp, .dsApp: return "app.badge"
+        case .sparkMax, .sparkFlex, .servoHub: return "bolt.fill"
+        }
+    }
+
+    var isDfu: Bool { [.sparkMax, .sparkFlex, .servoHub].contains(self) }
+
     static func available(for type: String) -> [Target] {
         switch type {
-        case "driver-hub": return [.driverOS]
-        case "control-hub": return [.controlOS, .firmware]
+        case "driver-hub": return [.driverOS, .dsApp]
+        case "control-hub": return [.controlOS, .rcApp, .firmware]
         default: return []
         }
     }
+}
+
+struct UpdateInfo: Decodable, Hashable {
+    let target: String
+    let installed: String?
+    let latest: String
+    let updateAvailable: Bool
+    let serial: String?
+}
+
+struct DeviceInfo: Decodable {
+    let id: String
+    let type: String
+    let serial: String?
+    let osVersion: String?
+    let android: String?
+    let rcReachable: Bool
+    let updates: [UpdateInfo]
+    var updateCount: Int { updates.filter(\.updateAvailable).count }
+}
+
+struct HubSettings: Decodable {
+    struct Channel: Decodable, Hashable {
+        let name: String
+        let displayName: String
+        let band: String?
+        let overlaps: Bool
+    }
+    let name: String
+    let password: String?
+    let channel: String?
+    let channels: [Channel]
+    let rcVersion: String?
+    let activeConfig: String?
+}
+
+struct DfuDevice: Decodable, Hashable, Identifiable {
+    let serial: String
+    let vid: String
+    let pid: String
+    var id: String { serial }
+}
+
+struct ClientVersion: Decodable {
+    let current: String
+    let latest: String?
+    let updateAvailable: Bool
+    let url: String
+}
+
+enum Page { case device, wifi, dfu }
+
+// last line of output as json
+func decodeLast<T: Decodable>(_ t: T.Type, _ out: String) -> T? {
+    let json = out.split(separator: "\n").last.map(String.init) ?? ""
+    return try? JSONDecoder().decode(t, from: Data(json.utf8))
 }
 
 struct Wifi: Decodable {
@@ -195,7 +274,24 @@ final class Model: ObservableObject {
     @Published var wifi: Wifi?
     @Published var wifiBusy = false
     @Published var wifiFailed = false
+    @Published var infos: [String: DeviceInfo] = [:]
+    @Published var hubSettings: HubSettings?
+    @Published var settingsError: String?
+    @Published var settingsBusy = false
+    @Published var dfuDevices: [DfuDevice] = []
+    @Published var dfuSerial = ""
+    @Published var dfuError: String?
+    @Published var dfuScanned = false
+    @Published var client: ClientVersion?
     let ssidReader = SSIDReader()
+
+    var info: DeviceInfo? { selected.flatMap { infos[$0.id] } }
+
+    func versions(_ t: Target) -> UpdateInfo? {
+        info?.updates.first { u in
+            u.target == t.rawValue && (t != .firmware || u.serial == targetSerial)
+        }
+    }
 
     var targetSerial: String {
         serial == "custom" ? customSerial.trimmingCharacters(in: .whitespaces) : serial
@@ -240,6 +336,93 @@ final class Model: ObservableObject {
             setStatus("Couldn't list devices. Check that node and adb are installed.", failed: true)
         }
         await loadSubHubs()
+        for d in devices { await loadInfo(d) }
+        await loadSettings()
+    }
+
+    func select(_ d: Device) async {
+        selected = d
+        await loadSubHubs()
+        if infos[d.id] == nil { await loadInfo(d) }
+        await loadSettings()
+    }
+
+    func loadInfo(_ d: Device) async {
+        let (code, out) = await Runner.run(["info", "--adb-id", d.id, "--json"])
+        if code == 0, let i = decodeLast(DeviceInfo.self, out) { infos[d.id] = i }
+    }
+
+    func loadSettings() async {
+        hubSettings = nil
+        settingsError = nil
+        guard let d = selected, d.type == "control-hub" else { return }
+        settingsBusy = true
+        defer { settingsBusy = false }
+        let (code, out) = await Runner.run(["settings", "--adb-id", d.id, "--json"])
+        if code == 0, let h = decodeLast(HubSettings.self, out) {
+            hubSettings = h
+        } else {
+            settingsError = "Couldn't read hub settings. Is the Robot Controller app running?"
+        }
+    }
+
+    func applySettings(name: String, password: String, channel: String) async {
+        guard let d = selected, let h = hubSettings else { return }
+        var args = ["settings", "--adb-id", d.id, "--yes", "--name", name]
+        if password != (h.password ?? "") { args += ["--password", password] }
+        if !channel.isEmpty && channel != h.channel { args += ["--channel", channel] }
+        await runLogged(args, start: "Applying hub settings…", done: "Settings sent. Reconnect to the hub's new network.")
+        await loadSettings()
+    }
+
+    func saveLogs() async {
+        guard let d = selected else { return }
+        busy = true
+        defer { busy = false }
+        log = []
+        setStatus("Saving logs…", failed: false)
+        let (code, out) = await Runner.run(["logs", "--adb-id", d.id, "--json"]) { [weak self] l in
+            Task { @MainActor in if !l.hasPrefix("{") { self?.append(l) } }
+        }
+        struct R: Decodable { let dir: String; let files: [String] }
+        if code == 0, let r = decodeLast(R.self, out) {
+            setStatus("Saved \(r.files.count) log files to Downloads.", failed: false)
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: r.dir)])
+        } else {
+            setStatus(log.last(where: { $0.hasPrefix("Error:") }) ?? "Couldn't save logs.", failed: true)
+        }
+    }
+
+    func loadDfu() async {
+        dfuError = nil
+        let (code, out) = await Runner.run(["dfu-list", "--json"]) { [weak self] l in
+            Task { @MainActor in if l.hasPrefix("Error:") { self?.dfuError = l } }
+        }
+        dfuScanned = true
+        if code == 0, let d = decodeLast([DfuDevice].self, out) {
+            dfuDevices = d
+            if !d.contains(where: { $0.serial == dfuSerial }) { dfuSerial = d.first?.serial ?? "" }
+        } else {
+            dfuDevices = []
+            dfuSerial = ""
+        }
+    }
+
+    func checkClient() async {
+        let (code, out) = await Runner.run(["version", "--check", "--json"])
+        if code == 0 { client = decodeLast(ClientVersion.self, out) }
+    }
+
+    private func runLogged(_ args: [String], start: String, done: String) async {
+        busy = true
+        defer { busy = false }
+        log = []
+        setStatus(start, failed: false)
+        let (code, _) = await Runner.run(args) { [weak self] l in
+            Task { @MainActor in self?.append(l) }
+        }
+        if code == 0 { setStatus(done, failed: false) }
+        else { setStatus(log.last(where: { $0.hasPrefix("Error:") }) ?? "Something went wrong.", failed: true) }
     }
 
     func loadSubHubs() async {
@@ -257,12 +440,18 @@ final class Model: ObservableObject {
     }
 
     func update(_ t: Target, flash: Bool) async {
-        guard let d = selected else { return }
+        var args = ["update", t.rawValue]
+        if t.isDfu {
+            guard !dfuSerial.isEmpty else { return }
+            args += ["--serial", dfuSerial]
+        } else {
+            guard let d = selected else { return }
+            args += ["--adb-id", d.id]
+            if t == .firmware { args += ["--serial", targetSerial] }
+        }
         busy = true
         defer { busy = false }
         log = []
-        var args = ["update", t.rawValue, "--adb-id", d.id]
-        if t == .firmware { args += ["--serial", targetSerial] }
         if flash { args.append("--yes") }
         setStatus(flash ? "Updating \(t.title)…" : "Checking \(t.title)…", failed: false)
         let (code, _) = await Runner.run(args) { [weak self] l in
@@ -275,6 +464,7 @@ final class Model: ObservableObject {
             }.first
             if flash {
                 setStatus("\(t.title)\(v.map { " " + $0 } ?? "") update sent.", failed: false)
+                if !t.isDfu, let d = selected { await loadInfo(d) }
             } else {
                 setStatus("\(v.map { "Version \($0)" } ?? "The latest version") is downloaded and ready to install. Nothing was sent to the hub.", failed: false)
             }
@@ -416,6 +606,20 @@ struct IconTile: View {
     }
 }
 
+struct Logo: View {
+    var size: CGFloat = 30
+    var body: some View {
+        if let p = Bundle.main.path(forResource: "logo", ofType: "png"), let img = NSImage(contentsOfFile: p) {
+            Image(nsImage: img).resizable().interpolation(.high).scaledToFit()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
+                .accessibilityLabel("REV logo")
+        } else {
+            IconTile(symbol: "arrow.down.circle.fill", size: size, tint: Theme.accent)
+        }
+    }
+}
+
 // views
 
 struct ContentView: View {
@@ -423,7 +627,12 @@ struct ContentView: View {
     @EnvironmentObject var prefs: Prefs
     @State private var confirm: Target?
     @State private var logOpen = false
-    @State private var showWifi = false
+    @State private var page: Page = .device
+    @State private var editName = ""
+    @State private var editPassword = ""
+    @State private var editChannel = ""
+    @State private var showPassword = false
+    @State private var confirmSettings = false
 
     var hc: Bool { prefs.highContrast }
 
@@ -433,8 +642,12 @@ struct ContentView: View {
             Rectangle().fill(Theme.stroke(hc)).frame(width: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
-                    if showWifi {
+                    if page == .wifi {
                         wifiPage
+                    } else if page == .dfu {
+                        dfuPage
+                        if let s = m.status { statusCard(s) }
+                        logCard
                     } else {
                         if let d = m.selected {
                             deviceHeader(d)
@@ -459,10 +672,18 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
         .task { logOpen = prefs.showLog; await m.refresh() }
+        .task { await m.checkClient() }
+        .onChange(of: m.hubSettings?.name) { _ in
+            editName = m.hubSettings?.name ?? ""
+            editPassword = m.hubSettings?.password ?? ""
+            editChannel = m.hubSettings?.channel ?? ""
+        }
         .alert(item: $confirm) { t in
             Alert(
                 title: Text("Install \(t.title)?"),
-                message: Text("Keep the hub plugged in and powered until it finishes. Don't run REV Hardware Client at the same time."),
+                message: Text(t.isDfu
+                    ? "Keep the device plugged in until it finishes. Make sure it's really a \(t.title)."
+                    : "Keep the hub plugged in and powered until it finishes. Don't run REV Hardware Client at the same time."),
                 primaryButton: .default(Text("Install")) { Task { await m.update(t, flash: true) } },
                 secondaryButton: .cancel()
             )
@@ -474,7 +695,7 @@ struct ContentView: View {
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                IconTile(symbol: "arrow.down.circle.fill", size: 30, tint: Theme.accent)
+                Logo(size: 30)
                 Text("Hub Updater").scaled(15, .semibold, prefs: prefs)
             }
             .padding(.top, 40)
@@ -512,7 +733,31 @@ struct ContentView: View {
 
             wifiRow.padding(.horizontal, 8)
 
+            Text("RECOVERY").scaled(11, .semibold, prefs: prefs)
+                .foregroundStyle(Theme.dim(hc)).tracking(0.6)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.horizontal, 20)
+                .padding(.top, 22)
+                .padding(.bottom, 8)
+
+            navRow("SPARK & Servo Hub", m.dfuScanned ? "\(m.dfuDevices.count) in DFU mode" : "USB firmware", "bolt.fill", .dfu) {
+                Task { await m.loadDfu() }
+            }
+            .padding(.horizontal, 8)
+
             Spacer()
+
+            if let c = m.client, c.updateAvailable, let u = URL(string: c.url) {
+                Button { NSWorkspace.shared.open(u) } label: {
+                    Label("Version \(c.latest ?? "") available", systemImage: "arrow.down.circle.fill")
+                        .scaled(12, .medium, prefs: prefs)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
+                .padding(.horizontal, 20)
+                .help("Open the release page for this app")
+            }
 
             Button {
                 Task { await m.refresh() }
@@ -536,11 +781,11 @@ struct ContentView: View {
     }
 
     func sideRow(_ d: Device) -> some View {
-        let on = m.selected == d && !showWifi
+        let on = m.selected == d && page == .device
+        let n = m.infos[d.id]?.updateCount ?? 0
         return Button {
-            m.selected = d
-            showWifi = false
-            Task { await m.loadSubHubs() }
+            page = .device
+            Task { await m.select(d) }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: d.symbol)
@@ -553,6 +798,13 @@ struct ContentView: View {
                         .foregroundStyle(Theme.dim(hc)).lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                if n > 0 {
+                    Text("\(n)")
+                        .font(.system(size: 10 * prefs.textScale, weight: .bold))
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.accent))
+                        .help("\(n) update\(n == 1 ? "" : "s") available")
+                }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(
@@ -567,7 +819,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(m.busy)
-        .accessibilityLabel("\(d.name), \(d.id)")
+        .accessibilityLabel("\(d.name), \(d.id)\(n > 0 ? ", \(n) updates available" : "")")
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 
@@ -616,13 +868,253 @@ struct ContentView: View {
                     .tactile(hc)
             }
             ForEach(targets) { t in updateCard(t) }
+            if d.type == "control-hub" { settingsCard }
+            if d.type != "unknown" { diagnosticsCard }
+        }
+    }
+
+    func versionLine(_ t: Target) -> some View {
+        Group {
+            if let v = m.versions(t) {
+                HStack(spacing: 6) {
+                    Chip(symbol: "checkmark.seal", text: "Installed \(v.installed ?? "none")")
+                    Chip(symbol: "arrow.down.circle", text: "Latest \(v.latest)")
+                    if v.updateAvailable {
+                        Text("Update available").scaled(11, .semibold, prefs: prefs)
+                            .foregroundStyle(Theme.accent)
+                    }
+                }
+            } else if t == .firmware, m.info?.rcReachable == false {
+                Text("Installed version unknown while the Robot Controller app isn't running.")
+                    .scaled(11, prefs: prefs).foregroundStyle(Theme.dim(hc))
+            }
+        }
+    }
+
+    func sectionTitle(_ s: String) -> some View {
+        Text(s).scaled(15, .semibold, prefs: prefs).accessibilityAddTraits(.isHeader).padding(.top, 10)
+    }
+
+    var settingsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Hub settings")
+            VStack(alignment: .leading, spacing: 14) {
+                if let e = m.settingsError {
+                    HStack {
+                        Label(e, systemImage: "exclamationmark.triangle.fill")
+                            .scaled(12, prefs: prefs).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Try again") { Task { await m.loadSettings() } }
+                            .buttonStyle(PillStyle(reduceMotion: prefs.reduceMotion))
+                    }
+                } else if let h = m.hubSettings {
+                    field("Name") {
+                        TextField("Hub name", text: $editName).textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Hub name")
+                    }
+                    field("Wi‑Fi password") {
+                        HStack {
+                            Group {
+                                if showPassword { TextField("Password", text: $editPassword) }
+                                else { SecureField("Password", text: $editPassword) }
+                            }
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Wi‑Fi password")
+                            Button { showPassword.toggle() } label: {
+                                Image(systemName: showPassword ? "eye.slash" : "eye")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+                        }
+                    }
+                    field("Channel") {
+                        Picker("Channel", selection: $editChannel) {
+                            if h.channel == nil { Text("Current").tag("") }
+                            ForEach(h.channels.filter { !$0.overlaps || $0.name == h.channel }, id: \.name) { c in
+                                Text(c.displayName).tag(c.name)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                    if let e = settingsProblem {
+                        Text(e).scaled(11, prefs: prefs).foregroundStyle(.orange)
+                    }
+                    HStack {
+                        Text("The hub restarts its Wi‑Fi after saving. Devices on it disconnect.")
+                            .scaled(11, prefs: prefs).foregroundStyle(Theme.dim(hc))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Save") { confirmSettings = true }
+                            .buttonStyle(PillStyle(primary: true, reduceMotion: prefs.reduceMotion))
+                            .disabled(settingsProblem != nil || !settingsChanged || m.busy)
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading settings…").scaled(12, prefs: prefs).foregroundStyle(Theme.dim(hc))
+                    }
+                }
+            }
+            .padding(18)
+            .tactile(hc)
+            .alert("Save hub settings?", isPresented: $confirmSettings) {
+                Button("Save") {
+                    Task { await m.applySettings(name: editName.trimmingCharacters(in: .whitespaces), password: editPassword, channel: editChannel) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The hub's Wi‑Fi network restarts. Phones and laptops connected to it will need to reconnect.")
+            }
+        }
+    }
+
+    var settingsChanged: Bool {
+        guard let h = m.hubSettings else { return false }
+        return editName.trimmingCharacters(in: .whitespaces) != h.name
+            || editPassword != (h.password ?? "")
+            || (!editChannel.isEmpty && editChannel != h.channel)
+    }
+
+    // same rules as the hub's manage page
+    var settingsProblem: String? {
+        let n = editName.trimmingCharacters(in: .whitespaces)
+        if n.count < 2 || n.count > 32 { return "Name must be 2 to 32 characters." }
+        if n.contains(where: \.isWhitespace) { return "Name can't contain spaces." }
+        if editPassword != (m.hubSettings?.password ?? "") && (editPassword.count < 8 || editPassword.count > 63) {
+            return "Password must be 8 to 63 characters."
+        }
+        return nil
+    }
+
+    func field<C: View>(_ label: String, @ViewBuilder _ c: () -> C) -> some View {
+        HStack {
+            Text(label).scaled(13, prefs: prefs).foregroundStyle(Theme.dim(hc)).frame(width: 110, alignment: .leading)
+            c()
+        }
+    }
+
+    var diagnosticsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Diagnostics")
+            VStack(alignment: .leading, spacing: 14) {
+                let i = m.info
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], alignment: .leading, spacing: 10) {
+                    info("Serial", i?.serial)
+                    info("OS", i?.osVersion)
+                    info("Android", i?.android)
+                    if m.selected?.type == "control-hub" {
+                        info("RC app", i?.rcReachable == true ? "Running" : "Not reachable")
+                        if let h = m.hubSettings {
+                            info("Active config", h.activeConfig)
+                        }
+                    }
+                }
+                Divider().overlay(Theme.stroke(hc))
+                HStack {
+                    Text("Saves Robot Controller, Driver Station, updater and Wi‑Fi logs, match logs and logcat to Downloads.")
+                        .scaled(11, prefs: prefs).foregroundStyle(Theme.dim(hc))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Save logs") { Task { await m.saveLogs() } }
+                        .buttonStyle(PillStyle(reduceMotion: prefs.reduceMotion))
+                        .disabled(m.busy)
+                }
+            }
+            .padding(18)
+            .tactile(hc)
+        }
+    }
+
+    func info(_ k: String, _ v: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(k).scaled(11, .medium, prefs: prefs).foregroundStyle(Theme.dim(hc))
+            Text(v ?? "—").scaled(13, .medium, prefs: prefs).monospaced().textSelection(.enabled).lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    // dfu
+
+    func navRow(_ title: String, _ sub: String, _ symbol: String, _ p: Page, onOpen: @escaping () -> Void) -> some View {
+        let on = page == p
+        return Button {
+            page = p
+            onOpen()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 14 * prefs.textScale))
+                    .frame(width: 20)
+                    .foregroundStyle(on ? .white : Theme.dim(hc))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).scaled(13, .medium, prefs: prefs)
+                    Text(sub).scaled(11, prefs: prefs).foregroundStyle(Theme.dim(hc)).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(on ? Theme.raised : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(on ? Theme.stroke(hc) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
+    var dfuPage: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(spacing: 16) {
+                IconTile(symbol: "bolt.fill", size: 56)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SPARK & Servo Hub").scaled(26, .bold, prefs: prefs)
+                    HStack(spacing: 6) {
+                        Chip(symbol: "cable.connector", text: "USB DFU")
+                        Chip(symbol: "number", text: m.dfuSerial.isEmpty ? "No device" : m.dfuSerial)
+                    }
+                }
+                Spacer()
+                Button("Scan") { Task { await m.loadDfu() } }
+                    .buttonStyle(PillStyle(reduceMotion: prefs.reduceMotion))
+                    .disabled(m.busy)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Put the device in recovery mode", systemImage: "info.circle")
+                    .scaled(13, .semibold, prefs: prefs)
+                Text("Unplug it, hold its mode button, plug it into this Mac over USB, then release. Press Scan. Pick the matching product below; the wrong firmware won't run.")
+                    .scaled(12, prefs: prefs).foregroundStyle(Theme.dim(hc))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let e = m.dfuError {
+                    Label(e.replacingOccurrences(of: "Error: ", with: ""), systemImage: "exclamationmark.triangle.fill")
+                        .scaled(12, prefs: prefs).foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if m.dfuDevices.count > 1 {
+                    Picker("Device", selection: $m.dfuSerial) {
+                        ForEach(m.dfuDevices) { d in Text(d.serial).tag(d.serial) }
+                    }
+                    .fixedSize()
+                } else if m.dfuScanned && m.dfuDevices.isEmpty {
+                    Text("No device in DFU mode found.").scaled(12, .medium, prefs: prefs).foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .tactile(hc)
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach([Target.sparkMax, .sparkFlex, .servoHub]) { t in updateCard(t) }
+            }
         }
     }
 
     func updateCard(_ t: Target) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 14) {
-                IconTile(symbol: t == .firmware ? "memorychip" : "shippingbox", size: 40)
+                IconTile(symbol: t.symbol, size: 40)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(t.title).scaled(15, .semibold, prefs: prefs)
                     Text(t.detail).scaled(12, prefs: prefs)
@@ -634,10 +1126,12 @@ struct ContentView: View {
                     .buttonStyle(PillStyle(reduceMotion: prefs.reduceMotion))
                     .help("Download and verify without touching the hub")
                 Button("Install") { confirm = t }
-                    .disabled(t == .firmware && m.targetSerial.isEmpty)
+                    .disabled((t == .firmware && m.targetSerial.isEmpty) || (t.isDfu && m.dfuSerial.isEmpty))
                     .buttonStyle(PillStyle(primary: true, reduceMotion: prefs.reduceMotion))
             }
             .disabled(m.busy)
+
+            versionLine(t)
 
             if t == .firmware {
                 Divider().overlay(Theme.stroke(hc))
@@ -678,14 +1172,14 @@ struct ContentView: View {
 
     var wifiRow: some View {
         Button {
-            showWifi = true
+            page = .wifi
             if m.wifi == nil { Task { await m.checkWifi() } }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "wifi")
                     .font(.system(size: 14 * prefs.textScale))
                     .frame(width: 20)
-                    .foregroundStyle(showWifi ? .white : Theme.dim(hc))
+                    .foregroundStyle(page == .wifi ? .white : Theme.dim(hc))
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Wi‑Fi").scaled(13, .medium, prefs: prefs)
                     Text(m.wifi.map { $0.onRcNetwork ? "Robot Controller" : ($0.connected ? "Not an RC network" : "Not connected") } ?? "Check connection")
@@ -700,13 +1194,13 @@ struct ContentView: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(showWifi ? Theme.raised : .clear))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(showWifi ? Theme.stroke(hc) : .clear))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(page == .wifi ? Theme.raised : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(page == .wifi ? Theme.stroke(hc) : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Wi‑Fi")
-        .accessibilityAddTraits(showWifi ? .isSelected : [])
+        .accessibilityAddTraits(page == .wifi ? .isSelected : [])
     }
 
     var wifiPage: some View {

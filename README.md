@@ -1,50 +1,39 @@
 # rev-hardware-client.mjs
 
-This repo houses `rev-hardware-client.mjs`, a Node.js command line tool that updates REV Driver Hubs, Control Hubs, and Expansion Hubs.
-It runs the same OS and firmware update steps as REV Hardware Client, but is designed to
-work on macOS. No Windows or virtualization layers.
+This repo has a Node.js command line tool and SwiftUI app for updating REV Driver Hubs, Control Hubs, and Expansion Hubs.
+It runs the same OS and firmware update steps as the official REV Hardware Client, but is designed to
+work on macOS (RHC v1 doesn't have MacOS support).
 
-## Why this tool exists
-
-The Rev Hardware Client only works on Windows. That's despite the fact that it is built on Electron, a widely used application framework notable for its cross-platform application support. ¯\_(ツ)_/¯
-
-This project extracts the important bits of FTC-specific functionality from the REV Hardware Client and reimplements them in to be generic and cross-platform, specifically for macOS and Linux users.
+CLI still works for Linux users, documented below.
 
 Note: This tool does not support all the features of the full REV Hardware Client. See the [Not supported](#not-supported) section below for details. It might be possible to extract those features as well, but no effort has been made to do so here.
 
 ## How it works
 
-REV Hardware Client talks to these hubs with ADB over USB and then plain HTTP.
+REV Hardware Client communicates over ADB using USB, with plain HTTP.
 
-1. `adb devices` finds the hub. `adb shell getprop <key>` differentiates a Driver Hub from a
-   Control Hub.
-2. `adb forward tcp:<local> tcp:8080` (and `tcp:8081`) exposes the hub's web server on
-   localhost.
-3. The tool downloads the update file from REV's public manifest
+1. Runs `adb devices` to find devices on the RC network
+2. `adb shell getprop <key>` to differentiate DS from a
+   Control Hub
+2. `adb forward tcp:<local> tcp:8080` (and `tcp:8081`) to expose onto localhost
+3. Downloads the update file from REV's public manifest
    (`https://www.revrobotics.com/content/sw/rev-hw-client/main.json`, then the `RevHub`
-   plugin JSON) and checks its SHA-256.
-4. The tool sends the file as a `multipart/form-data` POST to the hub's REST API.
-   The endpoints are `/uploadDriverHubOta`, `/uploadControlHubOta`, or
-   `/uploadExpansionHubFirmware` followed by `/performRevFirmwareUpdate`.
-
-These steps come from the main process source in REV Hardware Client 1.7.6
-(`resources/app.asar`). This path uses no native Windows binary such as CANBridge,
-FTDI D2XX, or `dfu-util-static.exe`.
+   plugin JSON) and checks its SHA-256
+4. Sends this file via POST to the hub's REST API
 
 ## Requirements
 
-- `adb` on `PATH`. On macOS, install it with `brew install android-platform-tools`.
-- Node.js 18 or later.
+- `adb` on `PATH`. On macOS, install it with `brew install android-platform-tools`, or [here](https://developer.android.com/tools/releases/platform-tools)
+- Node.js 18+.
+- `dfu-util`, only for SPARK MAX, SPARK Flex and Servo Hub firmware: `brew install dfu-util`.
 - A Driver Hub or Control Hub plugged into the Mac over USB.
-- Only one client per hub. REV Hardware Client and this tool both use `adb forward`, so
-  running both against the same hub causes conflicts.
 
-## Usage
+## CLI Usage
 
 ```
 ./rev-hardware-client.mjs list
 # prints each device ID and type, for example "R3CN9026H8P    driver-hub"
-# add --json to list, discover-hubs, or wifi for machine-readable output
+# add --json to list, discover-hubs, wifi, info, logs, settings, dfu-list or version
 
 ./rev-hardware-client.mjs update driver-hub-os
 # dry run, prints the version and file, and does not contact the hub
@@ -64,6 +53,31 @@ FTDI D2XX, or `dfu-util-static.exe`.
 ./rev-hardware-client.mjs wifi
 # checks whether this Mac is on a Robot Controller network, pings 192.168.43.1,
 # and checks the RC web server on port 8080
+
+./rev-hardware-client.mjs info
+# installed vs latest OS, app and firmware versions, and which have updates
+
+./rev-hardware-client.mjs update robot-controller-app --yes   # Control Hub
+./rev-hardware-client.mjs update driver-station-app --yes     # Driver Hub
+# installs the FTC app from REV's manifest over adb, then opens it
+
+./rev-hardware-client.mjs logs
+# saves RC/DS, updater and Wi-Fi logs, match logs and logcat to ~/Downloads
+
+./rev-hardware-client.mjs settings
+./rev-hardware-client.mjs settings --name 1234-RC --password <pw> --channel <channel> --yes
+# Control Hub only, needs the Robot Controller app running. Same request as the
+# hub's Manage page. The hub restarts its Wi-Fi after a change.
+
+./rev-hardware-client.mjs dfu-list
+./rev-hardware-client.mjs update spark-max-firmware --yes
+./rev-hardware-client.mjs update spark-flex-firmware --yes
+./rev-hardware-client.mjs update servo-hub-firmware --yes
+# needs dfu-util. Hold the device's mode button while plugging in USB to enter
+# DFU mode. Pass --serial if more than one device is in DFU mode.
+
+./rev-hardware-client.mjs version --check
+# checks GitHub releases for a newer version of this tool
 ```
 
 If more than one device is attached, pass `--adb-id <id>` to any command. Get the ID
@@ -71,7 +85,7 @@ from `list`.
 
 The tool caches verified downloads in `~/.rhc-mac-tool/downloads/`.
 
-## Mac app
+## Mac (native) app
 
 `app/` is a simple MacOS-only SwiftUI app.
 
@@ -79,7 +93,9 @@ The tool caches verified downloads in `~/.rhc-mac-tool/downloads/`.
 ./app/build.sh
 open "app/build/REV Hub Updater.app"
 ```
-Has same functionality as just using this service with the commands
+Has same functionality as just using this service with the commands. Device pages show
+installed and latest versions, hub settings and log saving; the sidebar has Wi‑Fi and
+SPARK & Servo Hub pages.
 
 macOS hides the Wi‑Fi network name unless an app has location access. The CLI can't
 show it; the app asks for permission the first time you click **Show network name**.
@@ -89,9 +105,9 @@ show it; the app asks for permission the first time you click **Show network nam
 These flows depend on Windows-only native modules or on hardware that was not available
 for testing.
 
-- **SPARK MAX, SPARK Flex, and Servo Hub firmware over DFU.** REV Hardware Client runs a
-  bundled `dfu-util-static.exe`. Homebrew's `dfu-util` may work in its place. Nobody has
-  traced or tested the arguments that `runDfuUtil` in `main.js` builds.
+- **SPARK settings** (motor type, limits, and so on). DFU firmware flashing is supported (untested on hardware), but
+  configuration uses REV's undocumented USB protocol.
+- **Hardware testing** (spinning motors, reading sensors).
 - **Expansion Hub firmware over a direct USB cable**, as opposed to through a Control
   Hub. This uses the `@rev-robotics/expansion-hub-ftdi` native module.
 - **Firmware for devices on a hub's CAN bus**, such as a chained SPARK MAX. REV Hardware
@@ -104,8 +120,4 @@ native library has to be built from source.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
-## Disclaimer
-
-This tool is provided as-is, without any warranty. Use it at your own risk. It worked during development and uses battle-tested tools (adb, nodejs), standard protocols (HTTP), and interacts with the same interfaces the official client does. But, it's still a third-party tool writing updates to proprietary hardware. We've run it and we're still here. But, we're weird people who don't fret about breaking things. You do you.
+Licensed under the MIT License. See [LICENSE](LICENSE) for details.
