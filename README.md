@@ -1,12 +1,14 @@
-# rev-hardware-client.mjs
+## REV Hardware Client for MacOS
 
-This repo has a Node.js command line tool and SwiftUI app for updating REV Driver Hubs, Control Hubs, and Expansion Hubs.
+A Node.js command line tool and SwiftUI app for updating REV Driver Hubs, Control Hubs, and Expansion Hubs.
 It runs the same OS and firmware update steps as the official REV Hardware Client, but is designed to
-work on macOS (RHC v1 doesn't have MacOS support).
+work on macOS; RHC v1 doesn't have MacOS support.
 
-CLI still works for Linux users, documented below.
+>[!NOTE]
+>CLI still works for Linux users, documented below.
 
-Note: This tool does not support all the features of the full REV Hardware Client. See the [Not supported](#not-supported) section below for details. It might be possible to extract those features as well, but no effort has been made to do so here.
+>[!IMPORTANT]
+>This tool does not support all the features of the full REV Hardware Client. See the [Not supported](#not-supported) section below for details. It might be possible to extract those features as well, but no effort has been made to do so here.
 
 ## How it works
 
@@ -27,6 +29,21 @@ REV Hardware Client communicates over ADB using USB, with plain HTTP.
 - Node.js 18+.
 - `dfu-util`, only for SPARK MAX, SPARK Flex and Servo Hub firmware: `brew install dfu-util`.
 - A Driver Hub or Control Hub plugged into the Mac over USB.
+
+## Mac (native) app
+
+`app/` is a simple MacOS-only SwiftUI app.
+
+```
+./app/build.sh
+open "app/build/REV Hub Updater.app"
+```
+Has same functionality as just using this service with the commands. Device pages show
+installed and latest versions, hub settings and log saving; the sidebar has Wi‑Fi and
+SPARK & Servo Hub pages.
+
+macOS hides the Wi‑Fi network name unless an app has location access. The CLI can't
+show it; the app asks for permission the first time you click **Show network name**.
 
 ## CLI Usage
 
@@ -84,21 +101,6 @@ If more than one device is attached, pass `--adb-id <id>` to any command. Get th
 from `list`.
 
 The tool caches verified downloads in `~/.rhc-mac-tool/downloads/`.
-
-## Mac (native) app
-
-`app/` is a simple MacOS-only SwiftUI app.
-
-```
-./app/build.sh
-open "app/build/REV Hub Updater.app"
-```
-Has same functionality as just using this service with the commands. Device pages show
-installed and latest versions, hub settings and log saving; the sidebar has Wi‑Fi and
-SPARK & Servo Hub pages.
-
-macOS hides the Wi‑Fi network name unless an app has location access. The CLI can't
-show it; the app asks for permission the first time you click **Show network name**.
 
 ## Not supported
 
